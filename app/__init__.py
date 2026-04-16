@@ -1,12 +1,13 @@
 from flask import Flask, jsonify, request, render_template, g
-from app.extensions import mongo, migrate, db, jwt
+from app.extensions import mongo, migrate, db, jwt, limiter
 from bson.objectid import ObjectId
 from config import Config
 import logging
 from time import strftime
-from app.models import Request
-from flask_jwt_extended import jwt_required, get_jwt_identity, get_jwt, set_access_cookies,unset_jwt_cookies
+from app.models.request import Request
+from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
 from app.routes.auth import auth_bp
+from app.routes.protected import protected_bp
 from flask_limiter.errors import RateLimitExceeded
 
 
@@ -21,8 +22,10 @@ def create_app(config_class=Config):
     db.init_app(app)
     migrate.init_app(app, db)
     jwt.init_app(app)
+    limiter.init_app(app)
 
     app.register_blueprint(auth_bp)
+    app.register_blueprint(protected_bp)
 
     @app.errorhandler(RateLimitExceeded)
     def handle_rate_limit(e):
@@ -43,26 +46,32 @@ def create_app(config_class=Config):
             "error": "Method not allowed for this endpoint"
         }), 405
     
-    @app.route('/', methods=['GET'])
-    def home():
-        return jsonify({"detail":"Hello"})
-
-    @app.route("/items", methods=["GET"])
-    def get_items():
-        responses = mongo.db.requests.find()
-        # return render_template('index.html', responses=responses)
-        return jsonify([Request.to_dict(response) for response in responses])
-
+    @app.errorhandler(RateLimitExceeded)
+    def handle_rate_limit(e):
+        return jsonify({
+            "error": "Rate limit exceeded",
+            "message": str(e.description),
+        }), 429
+    
     @app.before_request
     def log_request():
+        user = None
+        try:
+            verify_jwt_in_request(optional=True)
+            identity = get_jwt_identity()
+            if identity is not None:
+                user = identity
+        except Exception:
+            pass
         timestamp = strftime('[%Y-%b-%d %H:%M]')
         requests = {
             "timestamp": timestamp, 
+            "user": user,
             "req_addr":request.remote_addr,
             "method": request.method,
             "scheme": request.scheme,
             "path":request.full_path,
-            "data":request.data,
+            "data":request.get_data(as_text=True),
             "url":request.url,
         }
         requests = mongo.db.requests.insert_one(requests)
@@ -70,7 +79,7 @@ def create_app(config_class=Config):
         
     @app.after_request
     def log_response(response):
-        update_data ={"$set": {"status":response.status} }
+        update_data ={"$set": {"status":response.status,"response_data":response.get_data(as_text=True)} }
         mongo.db.requests.update_one({"_id": ObjectId(g.id)}, update_data)
         return response
 
@@ -80,5 +89,6 @@ def create_app(config_class=Config):
         if exception:
             update_data ={"$set": {"exception":exception} }
             mongo.db.requests.update_one({"_id": ObjectId(g.id)}, update_data)
-            
+
+
     return app

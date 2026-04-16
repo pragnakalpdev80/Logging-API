@@ -1,9 +1,43 @@
 import hashlib
 import re
+from flask import jsonify
 from flask_jwt_extended import create_access_token,create_refresh_token
-from app.models import User
-from app.extensions import db
+from app.models.user import User
+from app.models.revoked_token import RevokedTokenModel
+from app.extensions import db, jwt
 
+@jwt.token_in_blocklist_loader
+def check_if_token_revoked(jwt_header, jwt_payload):
+    jti = jwt_payload['jti']  
+    return RevokedTokenModel.is_jti_blacklisted(jti)
+
+@jwt.revoked_token_loader
+def revoked_token_callback(jwt_header, jwt_payload):
+    return jsonify({
+        'error': 'Token has been revoked',
+        'message': 'Please log in again'
+    }), 401
+
+@jwt.expired_token_loader
+def expired_token_callback(jwt_header, jwt_payload):
+    return jsonify({
+        'error': 'Token has expired',
+        'message': 'Please refresh your token or log in again'
+    }), 401
+
+@jwt.invalid_token_loader
+def invalid_token_callback(error):
+    return jsonify({
+        'error': 'Invalid token',
+        'message': 'Token verification failed'
+    }), 401
+
+@jwt.unauthorized_loader
+def missing_token_callback(error):
+    return jsonify({
+        'error': 'Authorization required',
+        'message': 'No token provided'
+    }), 401
 
 def encrypt_password(password):
     password=hashlib.md5(password.encode()).hexdigest()
@@ -63,5 +97,26 @@ class UserValidation:
             return None, "User not found", 404
         if user.password != encrypt_password(data["password"]):
             return None, "Wrong password", 400
-        token = create_access_token(identity=str(user.registration_id))
-        return {"access_token": token}, None, 200
+        token = create_access_token(identity=user.email)
+        refresh_token = create_refresh_token(identity=user.email)
+
+        return {"access_token": token,
+                'refresh_token': refresh_token
+                }, None, 200
+    
+    @staticmethod
+    def refresh(user):
+        user = User.query.filter_by(email=user).first()
+
+        new_access_token = create_access_token(
+            identity=user.email
+        )
+
+        return {'access_token': new_access_token},None, 200
+
+
+    @staticmethod
+    def logout_validation(jti):
+        revoked_token = RevokedTokenModel(jti=jti)
+        revoked_token.add()
+        return {'message': 'Successfully logged out'},None, 200
