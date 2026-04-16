@@ -1,5 +1,5 @@
 from flask import Flask, jsonify, request, render_template, g
-from app.extensions import mongo, migrate, db, jwt, limiter
+from app.extensions import mongo, migrate, db, jwt, limiter, auth_limiter
 from bson.objectid import ObjectId
 from config import Config
 import logging
@@ -23,6 +23,7 @@ def create_app(config_class=Config):
     migrate.init_app(app, db)
     jwt.init_app(app)
     limiter.init_app(app)
+    auth_limiter.init_app(app)
 
     app.register_blueprint(auth_bp)
     app.register_blueprint(protected_bp)
